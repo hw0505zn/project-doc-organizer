@@ -43,10 +43,21 @@ def _looks_like_scanned(src) -> bool:
         return True                                  # 抽不出字：当扫描件，让 OCR 试
 
 
+def _load_pymupdf():
+    """新版 PyMuPDF 用 pymupdf，旧版（<1.24.3）只有 fitz，两种都兼容。"""
+    try:
+        import pymupdf
+        return pymupdf
+    except ModuleNotFoundError:
+        import fitz
+        return fitz
+
+
 def _parse_pdf(src):
     import pdfplumber
-    import pymupdf
-    from rapidocr import RapidOCR
+
+    # rapidocr / pymupdf 都推迟到真正要 OCR 时才导入：
+    # 没装 OCR 依赖时，文字型 PDF 照样能抽，不会因为缺依赖整份失败
 
     # 1) 先判断是不是扫描件
     scanned = _looks_like_scanned(src)
@@ -67,8 +78,9 @@ def _parse_pdf(src):
 
     # 3) 扫描件 / 兜底：PDF → 图 → OCR（复用 Step 6-D 写法）
     try:
+        from rapidocr import RapidOCR
         engine = RapidOCR()                          # 模型已在包内，无需联网
-        doc = pymupdf.open(src)
+        doc = _load_pymupdf().open(src)              # 只有 OCR 路线才需要 pymupdf
         n_pages = doc.page_count
         lines = []
         for page in doc:
