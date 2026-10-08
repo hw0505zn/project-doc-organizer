@@ -5,6 +5,11 @@ secrets.toml
 data/raw/*
 !data/raw/.gitkeep
 
+# 评测集里的【原始资料】是真实工程资料（含合同金额、单位名称）→ 不进仓库（脱敏）
+# gold（标准答案）要提交；docs（原始资料）由 _pick_evalset.py 从 data/raw 本地重建
+evalset/docs/*
+!evalset/docs/.gitkeep
+
 __pycache__/
 *.pyc
 .venv/
