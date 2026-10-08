@@ -1,0 +1,5 @@
+[server]
+maxUploadSize = 200        # 单位 MB；Cloud 内存有限，建议主动调小并给友好提示
+
+[browser]
+gatherUsageStats = false   # 关闭 Streamlit 用量统计上报

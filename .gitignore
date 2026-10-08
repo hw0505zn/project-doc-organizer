@@ -10,6 +10,14 @@ data/raw/*
 evalset/docs/*
 !evalset/docs/.gitkeep
 
+
+# results/ 是抽取后的真实 JSON（项目名称/建设单位/总投资…），会随 public 仓库公开 → 必须挡住
+results/
+evals_snapshots/
+evals_errors.json
+failed.log
+progress.json
+
 __pycache__/
 *.pyc
 .venv/
@@ -18,3 +26,4 @@ venv/
 _*.py
 _*.txt
 _*.md
+
