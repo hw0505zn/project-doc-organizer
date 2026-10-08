@@ -4,6 +4,38 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# ---------- 输入归一化：磁盘路径 / 文件对象（界面层的 UploadedFile）两条路都要能吃 ----------
+# ★M3-5 Step 5-B 补接口的三条规矩：
+#   ① UploadedFile 的 .name 官方未做净化 → 只取最后一段文件名，绝不拿它拼磁盘路径；
+#   ② 同一个文件对象会被读多次（扫描件判定 → 抽字 → OCR）→ 每次交出去前先 seek(0)；
+#   ③ pymupdf/fitz 只认"路径"或"字节流"，不认 BytesIO → 文件对象要先转成 bytes 再传。
+def _is_fileobj(src) -> bool:
+    """判断是"文件对象"还是"路径"：带 read / getvalue 的当文件对象，其余当路径。"""
+    return hasattr(src, "read") or hasattr(src, "getvalue")
+
+
+def _safe_name(name) -> str:
+    """只取文件名的最后一段：丢掉 ../ 、盘符、目录分隔符，避免被拼成任意磁盘路径。"""
+    return Path(str(name or "")).name
+
+
+def _rewind(src):
+    """把文件对象拉回开头。为什么要：read() 读到尾部后再读返回空（"跑通了但输出是空的"）。"""
+    try:
+        src.seek(0)
+    except Exception:
+        pass                                          # 不是可定位的流就算了，后面读失败会有明确报错
+    return src
+
+
+def _read_bytes(src) -> bytes:
+    """一次拿到全部字节：优先 getvalue()（不受流位置影响），其次 read()（先回到开头，防读到空）。"""
+    if hasattr(src, "getvalue"):
+        return src.getvalue()                         # UploadedFile / BytesIO 都有 getvalue()
+    _rewind(src)
+    return src.read()
+
+
 # ---------- 返回结构：把三种情况分开（§3.2 空结果检测）----------
 @dataclass
 class ParseResult:
@@ -30,7 +62,7 @@ def _looks_like_scanned(src) -> bool:
     """用 pdfplumber 抽一遍：多数页都没字 → 判定为扫描件，交给 OCR。"""
     import pdfplumber
     try:
-        with pdfplumber.open(src) as pdf:
+        with pdfplumber.open(_rewind(src)) as pdf:     # 先回到开头：这份流后面还要再读一次
             pages = pdf.pages
             if not pages:
                 return False
@@ -53,6 +85,17 @@ def _load_pymupdf():
         return fitz
 
 
+def _open_pdf_doc(src):
+    """打开 PDF 给 OCR 用（pymupdf/fitz.open 的两张脸）：
+       · 路径        → open("a.pdf")
+       · 文件对象    → open(stream=字节, filetype="pdf")   ★直接塞 BytesIO 会 FileNotFoundError
+    """
+    mupdf = _load_pymupdf()
+    if _is_fileobj(src):
+        return mupdf.open(stream=_read_bytes(src), filetype="pdf")
+    return mupdf.open(str(src))
+
+
 def _parse_pdf(src):
     import pdfplumber
 
@@ -65,7 +108,7 @@ def _parse_pdf(src):
     # 2) 文字型：pdfplumber 直接抽
     if not scanned:
         try:
-            with pdfplumber.open(src) as pdf:
+            with pdfplumber.open(_rewind(src)) as pdf:     # 扫描件判定已经读过一次，这里必须回到开头
                 parts = [p.extract_text() or "" for p in pdf.pages]
             text = "\n".join(parts)
             return ParseResult(
@@ -80,7 +123,7 @@ def _parse_pdf(src):
     try:
         from rapidocr import RapidOCR
         engine = RapidOCR()                          # 模型已在包内，无需联网
-        doc = _load_pymupdf().open(src)              # 只有 OCR 路线才需要 pymupdf
+        doc = _open_pdf_doc(src)                     # 路径 / 文件对象两种输入都能开（见 _open_pdf_doc）
         n_pages = doc.page_count
         lines = []
         for page in doc:
@@ -105,7 +148,7 @@ def _parse_pdf(src):
 def _parse_docx(src):
     import docx
     try:
-        d = docx.Document(src)
+        d = docx.Document(_rewind(src))              # python-docx 吃路径也吃二进制文件对象
         parts = [p.text for p in d.paragraphs]       # 段落取正文
         for t in d.tables:                           # 表格内容需单独取
             for row in t.rows:
@@ -123,7 +166,8 @@ def _parse_docx(src):
 def _parse_xlsx(src):
     import openpyxl
     try:
-        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
+        # openpyxl 同样吃二进制文件对象（要求是"可读、可 seek"的流，UploadedFile 满足）
+        wb = openpyxl.load_workbook(_rewind(src), read_only=True, data_only=True)
         names = wb.sheetnames
         parts = []
         for ws in wb.worksheets:
@@ -142,10 +186,7 @@ def _parse_xlsx(src):
 # ---------- 纯文本 / Markdown ----------
 def _parse_text(src):
     try:
-        if isinstance(src, Path):
-            raw = src.read_bytes()
-        else:                                          # 文件对象
-            raw = src.getvalue() if hasattr(src, "getvalue") else src.read()
+        raw = src.read_bytes() if isinstance(src, Path) else _read_bytes(src)   # 路径 / 文件对象都行
     except Exception as e:
         return ParseResult(text="", meta={"parser": "text", "error": repr(e)}, ok=False)
     for enc in ("utf-8", "gbk", "utf-8-sig"):          # 先试 utf-8，再试 gbk（常见中文编码）
@@ -160,6 +201,24 @@ def _parse_text(src):
     return ParseResult(text="", meta={"parser": "text", "error": "decode failed"}, ok=False)
 
 
+# ---------- 图片（.png / .jpg / .jpeg）：直接 OCR，不用 pymupdf ----------
+def _parse_image(src):
+    """扫描图 / 照片 / 截图：RapidOCR 直接吃图片字节（pymupdf 只是"PDF 转图"用的，这里不需要）。"""
+    try:
+        from rapidocr import RapidOCR
+        engine = RapidOCR()                          # 模型已在包内，无需联网
+        # 路径就按路径读；文件对象走 _read_bytes（先 seek(0)，防读到空）
+        raw = src.read_bytes() if isinstance(src, Path) else _read_bytes(src)
+        res = engine(raw)                            # ★传字节：RapidOCR 认 bytes / 路径 / ndarray
+        text = "\n".join(res.txts) if res.txts else ""   # .txts 是文字元组（按检测框顺序）
+        return ParseResult(
+            text=text, meta={"parser": "rapidocr", "ocr": True},
+            empty=(text.strip() == ""),              # 图是空白的 → 静默失败要标出来
+        )
+    except Exception as e:
+        return ParseResult(text="", meta={"parser": "rapidocr", "error": repr(e)}, ok=False)
+
+
 # ---------- 入口：分发 + 支持文件路径 / 文件对象（§3.3）----------
 _SUFFIX_MAP = {
     ".pdf": _parse_pdf,
@@ -168,24 +227,32 @@ _SUFFIX_MAP = {
     ".xlsm": _parse_xlsx,
     ".txt": _parse_text,
     ".md": _parse_text,
+    ".png": _parse_image,
+    ".jpg": _parse_image,
+    ".jpeg": _parse_image,
 }
+
+# 界面层 st.file_uploader(type=...) 直接读这张表，别自己再抄一份
+# （否则会出现"界面允许传、核心层不支持"的静默不一致，见 M3-5 Step 5-D）
+SUPPORTED_SUFFIXES = tuple(sorted(_SUFFIX_MAP))
 
 
 def parse_file(source):
     """文件 → 文本 + 元信息（纯函数）。
 
-    source: 文件路径(str / Path) 或 已打开的二进制文件对象（如界面层上传的 BytesIO）。
+    source: 文件路径(str / Path) 或 已打开的二进制文件对象（如界面层上传的 UploadedFile / BytesIO）。
     返回 ParseResult：ok 区分“解析失败”，empty 区分“成功但为空”，status 一眼看出三种情况。
     """
     if isinstance(source, (str, Path)):
         src = Path(source)
         suffix = src.suffix.lower()
         meta_path = str(src)
-    else:                                               # 文件对象
+    else:                                               # 文件对象：后缀只能从 .name 来，且只取最后一段
         f = source
-        suffix = Path(getattr(f, "name", "")).suffix.lower()
+        name = _safe_name(getattr(f, "name", ""))       # ★未净化的名字（可能带 ..\）不能拿去拼路径
+        suffix = Path(name).suffix.lower()
         src = f
-        meta_path = getattr(f, "name", "") or "<fileobj>"
+        meta_path = name or "<fileobj>"
 
     parser = _SUFFIX_MAP.get(suffix)
     if parser is None:

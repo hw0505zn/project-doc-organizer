@@ -1,0 +1,24 @@
+# 工程项目资料智能整理器 —— 依赖清单
+# ★位置：必须在【仓库根】—— M3-7 上 Streamlit Community Cloud 时从根目录初始化，放 ui/ 里会找不到
+# ★生成方式：.venv 里 pip freeze 之后，只保留【代码里直接 import 的包】；
+#   传递依赖（pandas / numpy / pillow / protobuf 等）交给 pip 自己解析，不 pin，避免本地与云端版本打架
+# ★安装：pip install -r requirements.txt
+
+# ── 界面层（M3-5，薄壳）────────────────────────
+streamlit==1.65.0
+
+# ── AI 调用 + 配置（M2 / M3-2）─────────────────
+requests==2.34.2
+python-dotenv==1.2.3        # 本地 .env 里的 DEEPSEEK_API_KEY；云端走 st.secrets
+                            # 两者都是环境变量 → 核心层 os.environ.get() 一套写法本地线上通吃
+
+# ── 解析层（M3-1）──────────────────────────────
+pdfplumber==0.11.10         # 文字型 PDF → 文本
+pymupdf==1.28.2             # PDF 兜底解析 / 扫描件渲染成图（import fitz）
+rapidocr==3.9.2             # 扫描件 OCR
+                            # ⚠️ 它带 onnxruntime，体积大：M3-7 上云前先确认装得动，
+                            #    装不动就摘掉、解析层对扫描件返回 empty、界面上标注"扫描件暂不支持"
+python-docx==1.2.0          # Word（import docx）
+openpyxl==3.1.5             # Excel
+
+# TXT / Markdown 走标准库，无需额外依赖
